@@ -79,7 +79,6 @@ function Credit({ variant = "light" }) {
   );
 }
 
-
 function Logomark({ size = 40, style = {}, className = "" }) {
   return (
     <svg
@@ -116,19 +115,80 @@ function Logomark({ size = 40, style = {}, className = "" }) {
   );
 }
 
+// <-- NEW: themed replacement for window.confirm. Renders as a centered
+// modal matching the paper/ink/coral aesthetic instead of the native
+// browser popup. Purely presentational — the actual delete logic still
+// lives in deleteFile(), this just decides *when* to call it.
+function ConfirmDeleteModal({ name, onCancel, onConfirm }) {
+  if (!name) return null;
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+      <div
+        onClick={onCancel}
+        style={{ position: "absolute", inset: 0, backgroundColor: "rgba(32,41,58,0.5)" }}
+        aria-hidden="true"
+      />
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-delete-title"
+        style={{
+          position: "relative",
+          width: "100%",
+          maxWidth: "360px",
+          borderRadius: "20px",
+          backgroundColor: PAPER,
+          border: `1px solid ${INK}1f`,
+          padding: "24px",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "14px" }}>
+          <div style={{ width: "40px", height: "40px", borderRadius: "12px", backgroundColor: `${CORAL}1a`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Trash2 style={{ width: "18px", height: "18px", color: CORAL }} />
+          </div>
+          <div id="confirm-delete-title" style={{ fontSize: "16px", fontWeight: 800 }}>
+            Remove document?
+          </div>
+        </div>
+
+        <div style={{ fontSize: "13px", lineHeight: 1.6, color: `${INK}99`, marginBottom: "22px" }}>
+          <strong style={{ color: INK, wordBreak: "break-word" }}>{name}</strong> will be removed from this workspace. This can't be undone.
+        </div>
+
+        <div style={{ display: "flex", gap: "10px" }}>
+          <button
+            onClick={onCancel}
+            className="focus-visible:outline focus-visible:outline-2"
+            style={{ flex: 1, padding: "11px", borderRadius: "10px", border: `1px solid ${INK}1f`, background: "#fff", fontWeight: 700, fontSize: "13px", cursor: "pointer", color: INK, outlineColor: TEAL }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="focus-visible:outline focus-visible:outline-2"
+            style={{ flex: 1, padding: "11px", borderRadius: "10px", border: "none", background: CORAL, fontWeight: 700, fontSize: "13px", cursor: "pointer", color: "#fff", outlineColor: TEAL }}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState("upload");
   const [file, setFile] = useState(null);
   const [attachedFiles, setAttachedFiles] = useState([]);
-  const [deletingFile, setDeletingFile] = useState(null); // <-- NEW: filename currently being deleted
+  const [deletingFile, setDeletingFile] = useState(null); // filename currently being deleted
+  const [confirmDeleteName, setConfirmDeleteName] = useState(null); // <-- NEW: filename pending confirmation
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSeconds, setUploadSeconds] = useState(0);
   const [isTyping, setIsTyping] = useState(false);
-  // <-- CHANGED: this now only controls the mobile drawer overlay — the
-  // desktop sidebar (lg and up) is always visible regardless of this value.
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [dragActive, setDragActive] = useState(false);
@@ -141,9 +201,7 @@ export default function App() {
 
   useEffect(() => {
     const handleBeforeUnload = () => {
-      // Only attempt to delete if we have a real session ID
       if (sessionId && sessionId !== "demo") {
-        // keepalive: true ensures the request finishes even if the tab closes/refreshes
         fetch(`${API_URL}/session/${sessionId}`, {
           method: "DELETE",
           keepalive: true,
@@ -152,7 +210,7 @@ export default function App() {
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
-    
+
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
@@ -196,8 +254,6 @@ export default function App() {
     const formData = new FormData();
     formData.append("file", file);
 
-    // Embedding models can take a while to spin up on a cold start, so this
-    // gives the backend real time to finish instead of bailing out early.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 120000);
 
@@ -268,9 +324,6 @@ export default function App() {
 
     const formData = new FormData();
     formData.append("file", newFile);
-    // Reuse the current session so the backend tags this document's chunks
-    // with the same session_id — joining it into the existing workspace
-    // instead of starting a fresh, disconnected one.
     if (sessionId) formData.append("session_id", sessionId);
 
     const controller = new AbortController();
@@ -286,8 +339,6 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Upload failed");
 
-      // The backend should echo back the same session_id we sent — this
-      // just keeps things in sync if it ever doesn't.
       setSessionId(data.session_id);
       setFile(newFile);
       setAttachedFiles((prev) => (prev.includes(newFile.name) ? prev : [...prev, newFile.name]));
@@ -316,10 +367,7 @@ export default function App() {
     }
   };
 
-  // <-- NEW: remove a single file's chunks from the current session. This
-  // is what powers the trash icon next to each file in the sidebar, so a
-  // document uploaded by mistake can be taken back out without wiping the
-  // whole workspace.
+  // Remove a single file's chunks from the current session.
   const deleteFile = async (name) => {
     if (!sessionId || deletingFile) return;
 
@@ -349,7 +397,6 @@ export default function App() {
       if (file?.name === name) setFile(null);
 
       if (remaining.length === 0) {
-        // No documents left in this workspace — go back to the upload screen.
         resetToUpload();
         return;
       }
@@ -410,7 +457,15 @@ export default function App() {
       });
       clearTimeout(timeoutId);
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "The assistant could not answer.");
+
+      // <-- NEW: the backend sends detail: "high_traffic" when Gemini itself
+      // is rate-limited or overloaded (429/503 from Google). We turn that
+      // machine-readable code into a specific, honest message below instead
+      // of lumping it in with real backend/connection errors.
+      if (!res.ok) {
+        if (data.detail === "high_traffic") throw new Error("HIGH_TRAFFIC");
+        throw new Error(data.detail || "The assistant could not answer.");
+      }
 
       const cleanReply = String(data.reply || "")
         .replace(/<scratchpad>[\s\S]*?<\/scratchpad>\s*/gi, "")
@@ -424,12 +479,15 @@ export default function App() {
       clearTimeout(timeoutId);
       console.error(error);
       const timedOut = error.name === "AbortError";
+      const highTraffic = error.message === "HIGH_TRAFFIC";
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
           content: timedOut
             ? "**No response after 3 minutes.** The backend received the request but never replied — check its terminal for a hang or an unhandled exception (e.g. stuck on the embedding query or the Gemini call)."
+            : highTraffic
+            ? "**High demand right now.** Gemini is getting a lot of traffic at the moment — wait a few seconds and try sending that again."
             : `**Connection error.** ${error.message || "Is the backend running?"}`,
         },
       ]);
@@ -798,15 +856,11 @@ export default function App() {
     );
   }
 
-  // <-- NEW: shared sidebar body, rendered both in the always-visible
-  // desktop sidebar and inside the mobile drawer overlay below, so the two
-  // stay in sync without duplicating the file-list logic.
   const sidebarBody = (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", height: "60px", padding: "0 16px", borderBottom: `1px solid ${INK}14` }}>
         <Logomark size={30} style={{ borderRadius: "9px" }} />
         <span style={{ fontSize: "14px", fontWeight: 800, flex: 1 }}>Learn with AI</span>
-        {/* Close button only makes sense inside the mobile drawer */}
         <button
           onClick={() => setSidebarOpen(false)}
           className="lg:hidden focus-visible:outline focus-visible:outline-2"
@@ -876,11 +930,8 @@ export default function App() {
                   {name}
                 </span>
                 <button
-                  onClick={() => {
-                    if (window.confirm(`Remove "${name}" from this workspace?`)) {
-                      deleteFile(name);
-                    }
-                  }}
+                  // <-- CHANGED: opens the themed modal instead of window.confirm
+                  onClick={() => setConfirmDeleteName(name)}
                   disabled={isDeleting}
                   className="file-delete-btn focus-visible:outline focus-visible:outline-2"
                   title={`Remove ${name}`}
@@ -922,7 +973,17 @@ export default function App() {
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", backgroundColor: PAPER, color: INK }}>
       <FontLoader />
 
-      {/* Desktop sidebar — always visible at lg (1024px) and up, regardless of sidebarOpen */}
+      {/* <-- NEW: themed delete confirmation modal, replaces window.confirm */}
+      <ConfirmDeleteModal
+        name={confirmDeleteName}
+        onCancel={() => setConfirmDeleteName(null)}
+        onConfirm={() => {
+          const name = confirmDeleteName;
+          setConfirmDeleteName(null);
+          deleteFile(name);
+        }}
+      />
+
       <aside
         className="hidden lg:flex"
         style={{
@@ -936,7 +997,6 @@ export default function App() {
         {sidebarBody}
       </aside>
 
-      {/* Mobile drawer — overlay + backdrop, toggled by the hamburger button in the chat header */}
       {sidebarOpen && (
         <div className="lg:hidden" style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex" }}>
           <div
@@ -960,7 +1020,6 @@ export default function App() {
       )}
 
       <main style={{ position: "relative", display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}>
-        {/* Mobile-only header bar with the sidebar toggle — hidden at lg and up since the sidebar is always visible there */}
         <div
           className="lg:hidden"
           style={{
