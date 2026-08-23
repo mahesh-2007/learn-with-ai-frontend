@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', sans-serif;
+    background-color: #0c0c0d; /* Deep premium dark background */
+    color: #e5e7eb;
+  }
+}
+
+/* Custom glowing animations for the Gemini feel */
+.gemini-gradient {
+  background: linear-gradient(135deg, #4285f4, #9b72cb, #d96570);
+}
+
+.gemini-text {
+  background: linear-gradient(to right, #4a90e2, #b86bdf, #ff8c8c);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.glow-ring {
+  box-shadow: 0 0 40px -10px rgba(155, 114, 203, 0.5);
+}
