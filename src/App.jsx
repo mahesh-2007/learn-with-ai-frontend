@@ -54,15 +54,25 @@ function stripScratchpad(raw) {
   return cleaned;
 }
 
-function getStreamText(raw) {
+function getStreamText(raw, allowIncomplete = false) {
   const text = String(raw);
-  if (!/^\s*\{/.test(text)) return text;
+  const dataLines = text
+    .split(/\r?\n/)
+    .filter((line) => line.trimStart().startsWith("data:"))
+    .map((line) => line.replace(/^\s*data:\s?/, ""));
+  const candidate = dataLines.length ? dataLines.join("") : text;
+  if (!/^\s*[{[]/.test(candidate)) return candidate;
 
   try {
-    const payload = JSON.parse(text);
-    return typeof payload.reply === "string" ? payload.reply : text;
+    const payload = JSON.parse(candidate);
+    if (typeof payload === "string") return payload;
+    if (typeof payload.reply === "string") return payload.reply;
+    if (typeof payload.response === "string") return payload.response;
+    return candidate;
   } catch {
-    return "";
+    // Do not render an incomplete JSON envelope. The completed response is
+    // parsed again after the reader finishes.
+    return allowIncomplete ? candidate : "";
   }
 }
 
@@ -574,7 +584,7 @@ export default function App() {
       }
 
       rawBuffer += decoder.decode();
-      const finalText = stripScratchpad(getStreamText(rawBuffer)).trim();
+      const finalText = stripScratchpad(getStreamText(rawBuffer, true)).trim();
       pendingText = finalText;
       await revealPendingText();
       setMessages((prev) => {
