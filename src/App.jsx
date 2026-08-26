@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Check,
@@ -8,7 +8,6 @@ import {
   Menu,
   MessageSquarePlus,
   Paperclip,
-  PenLine,
   Plus,
   RotateCcw,
   Sparkles,
@@ -35,6 +34,38 @@ const suggestedPrompts = [
   { title: "Explain simply", text: "Explain the hardest concepts in simple language with examples." },
 ];
 
+// Strips <scratchpad>...</scratchpad> blocks from streamed text. Because
+// text arrives in arbitrary chunks, this also hides a scratchpad block the
+// instant its opening tag appears (even before the closing tag has arrived),
+// and trims a partial tag fragment (e.g. "<scratch") that might be sitting
+// at the very end of the buffer mid-stream.
+function stripScratchpad(raw) {
+  let cleaned = raw.replace(/<scratchpad>[\s\S]*?<\/scratchpad>/gi, "");
+
+  const openMatch = cleaned.match(/<scratchpad\b[^>]*>/i);
+  if (openMatch) {
+    cleaned = cleaned.slice(0, openMatch.index);
+  } else {
+    // Hide a trailing partial opening tag, e.g. "<scr" or "<scratchpad" with
+    // no ">" yet, so it doesn't flash on screen for a frame.
+    cleaned = cleaned.replace(/<[a-zA-Z]*$/, "");
+  }
+
+  return cleaned;
+}
+
+function getStreamText(raw) {
+  const text = String(raw);
+  if (!/^\s*\{/.test(text)) return text;
+
+  try {
+    const payload = JSON.parse(text);
+    return typeof payload.reply === "string" ? payload.reply : text;
+  } catch {
+    return "";
+  }
+}
+
 function FontLoader() {
   return (
     <style>{`
@@ -56,6 +87,16 @@ function FontLoader() {
       .file-row .file-delete-btn { opacity: 0; transition: opacity 0.15s ease; }
       .file-row:hover .file-delete-btn { opacity: 1; }
       .file-delete-btn:focus-visible { opacity: 1; }
+      .stream-cursor {
+        display: inline-block;
+        width: 2px;
+        height: 1em;
+        margin-left: 2px;
+        vertical-align: -0.15em;
+        background: ${TEAL};
+        animation: stream-blink 0.9s steps(1) infinite;
+      }
+      @keyframes stream-blink { 50% { opacity: 0; } }
     `}</style>
   );
 }
@@ -115,10 +156,10 @@ function Logomark({ size = 40, style = {}, className = "" }) {
   );
 }
 
-// <-- NEW: themed replacement for window.confirm. Renders as a centered
-// modal matching the paper/ink/coral aesthetic instead of the native
-// browser popup. Purely presentational — the actual delete logic still
-// lives in deleteFile(), this just decides *when* to call it.
+// Themed replacement for window.confirm. Renders as a centered modal
+// matching the paper/ink/coral aesthetic instead of the native browser
+// popup. Purely presentational — the actual delete logic still lives in
+// deleteFile(), this just decides *when* to call it.
 function ConfirmDeleteModal({ name, onCancel, onConfirm }) {
   if (!name) return null;
   return (
@@ -182,7 +223,7 @@ export default function App() {
   const [file, setFile] = useState(null);
   const [attachedFiles, setAttachedFiles] = useState([]);
   const [deletingFile, setDeletingFile] = useState(null); // filename currently being deleted
-  const [confirmDeleteName, setConfirmDeleteName] = useState(null); // <-- NEW: filename pending confirmation
+  const [confirmDeleteName, setConfirmDeleteName] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -422,6 +463,11 @@ export default function App() {
     }
   };
 
+  // Sends a message and streams the assistant's reply token-by-token as it
+  // arrives from the backend's StreamingResponse (plain text chunks, not
+  // SSE/JSON). A placeholder assistant message is inserted immediately and
+  // its content is updated as each chunk is decoded, with <scratchpad>
+  // content filtered out live.
   const sendMessage = async (e, explicitText) => {
     e?.preventDefault();
     const userMessage = (explicitText ?? input).trim();
@@ -446,52 +492,125 @@ export default function App() {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 180000);
+    let timeoutId = setTimeout(() => controller.abort(), 180000);
+
+    // Insert a placeholder assistant message that gets filled in as chunks
+    // stream in. `assistantIndex` is captured synchronously from the updater.
+    let assistantIndex = -1;
+    let streamActive = true;
+    setMessages((prev) => {
+      assistantIndex = prev.length;
+      return [...prev, { role: "assistant", content: "", streaming: true }];
+    });
 
     try {
       const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
         body: JSON.stringify({ session_id: sessionId, message: userMessage }),
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
-      const data = await res.json();
 
-      // <-- NEW: the backend sends detail: "high_traffic" when Gemini itself
-      // is rate-limited or overloaded (429/503 from Google). We turn that
-      // machine-readable code into a specific, honest message below instead
-      // of lumping it in with real backend/connection errors.
       if (!res.ok) {
-        if (data.detail === "high_traffic") throw new Error("HIGH_TRAFFIC");
-        throw new Error(data.detail || "The assistant could not answer.");
+        // The backend failed before it started streaming (e.g. retrieval
+        // error) — this path still returns a normal JSON error body.
+        let detail = "The assistant could not answer.";
+        try {
+          const data = await res.json();
+          detail = data.detail || detail;
+        } catch {
+          // Response wasn't JSON — keep the generic message.
+        }
+        if (detail === "high_traffic") throw new Error("HIGH_TRAFFIC");
+        throw new Error(detail);
       }
 
-      const cleanReply = String(data.reply || "")
-        .replace(/<scratchpad>[\s\S]*?<\/scratchpad>\s*/gi, "")
-        .trim();
+      if (!res.body) throw new Error("Streaming isn't supported in this browser.");
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: cleanReply || "I couldn't generate an answer for that." },
-      ]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let rawBuffer = "";
+      let receivedAny = false;
+      let displayedText = "";
+      let pendingText = "";
+      let revealChain = Promise.resolve();
+
+      const revealPendingText = () => {
+        revealChain = revealChain.then(async () => {
+          while (streamActive && displayedText.length < pendingText.length) {
+            const nextSpace = pendingText.indexOf(" ", displayedText.length + 1);
+            const end = nextSpace === -1 ? pendingText.length : nextSpace + 1;
+            displayedText = pendingText.slice(0, end);
+            setMessages((prev) => {
+              const next = [...prev];
+              if (next[assistantIndex]) {
+                next[assistantIndex] = { role: "assistant", content: displayedText, streaming: true };
+              }
+              return next;
+            });
+            await new Promise((resolve) => setTimeout(resolve, 28));
+          }
+        });
+        return revealChain;
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // We're actively receiving data, so the "hung connection" timeout
+        // no longer applies — reset it so a slow-but-alive stream isn't
+        // killed mid-answer.
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => controller.abort(), 180000);
+        receivedAny = true;
+
+        rawBuffer += decoder.decode(value, { stream: true });
+        pendingText = stripScratchpad(getStreamText(rawBuffer)).trimStart();
+        revealPendingText();
+      }
+
+      rawBuffer += decoder.decode();
+      const finalText = stripScratchpad(getStreamText(rawBuffer)).trim();
+      pendingText = finalText;
+      await revealPendingText();
+      setMessages((prev) => {
+        const next = [...prev];
+        if (next[assistantIndex]) {
+          next[assistantIndex] = {
+            role: "assistant",
+            content: finalText || (receivedAny ? "" : "I couldn't generate an answer for that."),
+            streaming: false,
+          };
+        }
+        return next;
+      });
     } catch (error) {
-      clearTimeout(timeoutId);
       console.error(error);
       const timedOut = error.name === "AbortError";
       const highTraffic = error.message === "HIGH_TRAFFIC";
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: timedOut
-            ? "**No response after 3 minutes.** The backend received the request but never replied — check its terminal for a hang or an unhandled exception (e.g. stuck on the embedding query or the Gemini call)."
-            : highTraffic
-            ? "**High demand right now.** Gemini is getting a lot of traffic at the moment — wait a few seconds and try sending that again."
-            : `**Connection error.** ${error.message || "Is the backend running?"}`,
-        },
-      ]);
+      const errorText = timedOut
+        ? "**No response after 3 minutes.** The backend received the request but never replied — check its terminal for a hang or an unhandled exception (e.g. stuck on the embedding query or the Gemini call)."
+        : highTraffic
+        ? "**High demand right now.** Gemini is getting a lot of traffic at the moment — wait a few seconds and try sending that again."
+        : `**Connection error.** ${error.message || "Is the backend running?"}`;
+
+      setMessages((prev) => {
+        const next = [...prev];
+        // If the placeholder never received any text, replace it in place
+        // rather than leaving an empty bubble plus a separate error bubble.
+        if (assistantIndex !== -1 && next[assistantIndex]?.role === "assistant" && next[assistantIndex]?.streaming) {
+          next[assistantIndex] = { role: "assistant", content: errorText, streaming: false };
+          return next;
+        }
+        return [...next, { role: "assistant", content: errorText, streaming: false }];
+      });
     } finally {
+      streamActive = false;
+      clearTimeout(timeoutId);
       setIsTyping(false);
     }
   };
@@ -930,7 +1049,6 @@ export default function App() {
                   {name}
                 </span>
                 <button
-                  // <-- CHANGED: opens the themed modal instead of window.confirm
                   onClick={() => setConfirmDeleteName(name)}
                   disabled={isDeleting}
                   className="file-delete-btn focus-visible:outline focus-visible:outline-2"
@@ -969,11 +1087,14 @@ export default function App() {
     </>
   );
 
+  const lastMessage = messages[messages.length - 1];
+  const hasStreamingMessage = messages.some((message) => message.role === "assistant" && message.streaming);
+  const showTypingDots = isTyping && !hasStreamingMessage && lastMessage?.role !== "assistant";
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", backgroundColor: PAPER, color: INK }}>
       <FontLoader />
 
-      {/* <-- NEW: themed delete confirmation modal, replaces window.confirm */}
       <ConfirmDeleteModal
         name={confirmDeleteName}
         onCancel={() => setConfirmDeleteName(null)}
@@ -1101,9 +1222,10 @@ export default function App() {
                   <div style={{ minWidth: 0, flex: 1, paddingTop: "3px" }}>
                     <div style={{ fontSize: "15px", lineHeight: 1.7, color: `${INK}e6` }}>
                       {msg.role === "user" ? msg.content : renderText(msg.content)}
+                      {msg.role === "assistant" && msg.streaming && <span className="stream-cursor" />}
                     </div>
 
-                    {msg.role === "assistant" && (
+                    {msg.role === "assistant" && !msg.streaming && (
                       <div
                         className="opacity-0 group-hover:opacity-100"
                         style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "2px", transition: "opacity 0.15s ease" }}
@@ -1132,7 +1254,7 @@ export default function App() {
                 </div>
               ))}
 
-              {isTyping && (
+              {showTypingDots && (
                 <div style={{ display: "flex", gap: "14px", alignItems: "flex-start" }}>
                   <div
                     style={{
