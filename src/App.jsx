@@ -35,6 +35,12 @@ const suggestedPrompts = [
   { title: "Explain simply", text: "Explain the hardest concepts in simple language with examples." },
 ];
 
+const modelOptions = [
+  { value: "gemini-3.6-flash", label: "Gemini", detail: "Fast and balanced" },
+  { value: "openai/gpt-oss-120b", label: "GPT-OSS", detail: "Detailed reasoning" },
+  { value: "openai/gpt-oss-20b", label: "GPT-OSS 20B", detail: "Fast and efficient" },
+];
+
 // Strips <scratchpad>...</scratchpad> blocks from streamed text. Because
 // text arrives in arbitrary chunks, this also hides a scratchpad block the
 // instant its opening tag appears (even before the closing tag has arrived),
@@ -244,6 +250,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [dragActive, setDragActive] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("gemini-3.6-flash");
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -521,7 +528,7 @@ export default function App() {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ session_id: sessionId, message: userMessage }),
+        body: JSON.stringify({ session_id: sessionId, message: userMessage, model_name: selectedModel }),
         signal: controller.signal,
       });
 
@@ -676,53 +683,101 @@ export default function App() {
 
   const renderText = (text) => {
     const blocks = String(text).split("\n");
-    return blocks.map((line, i) => {
+    const isTableDivider = (line) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line);
+    const splitTableRow = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+    const renderTableCell = (cell) => cell.replace(/<br\s*\/?>/gi, "\n").split("\n").map((part, index) => {
+      const content = part.trim();
+      if (!content) return <br key={index} />;
+      return (
+        <span key={index} style={{ display: "block", marginTop: index ? "5px" : 0 }}>
+          {content.startsWith("•") ? (
+            <span style={{ display: "flex", gap: "7px" }}>
+              <span style={{ color: CORAL }}>•</span>
+              <span>{formatInline(content.slice(1).trim())}</span>
+            </span>
+          ) : formatInline(content)}
+        </span>
+      );
+    });
+
+    const rendered = [];
+    for (let i = 0; i < blocks.length; i += 1) {
+      const nextContentIndex = blocks.slice(i + 1).findIndex((line) => line.trim());
+      const dividerIndex = nextContentIndex === -1 ? -1 : i + 1 + nextContentIndex;
+
+      if (blocks[i].includes("|") && dividerIndex === i + 1 && isTableDivider(blocks[dividerIndex])) {
+        const header = splitTableRow(blocks[i]);
+        const rows = [];
+        let end = dividerIndex + 1;
+        while (end < blocks.length && (!blocks[end].trim() || blocks[end].includes("|"))) {
+          if (blocks[end].trim()) rows.push(splitTableRow(blocks[end]));
+          end += 1;
+        }
+
+        rendered.push(
+          <div key={`table-${i}`} style={{ overflowX: "auto", margin: "18px 0", border: `1px solid ${INK}1f`, borderRadius: "10px", backgroundColor: "#ffffff" }}>
+            <table style={{ width: "100%", minWidth: "560px", borderCollapse: "collapse", fontSize: "13px", lineHeight: 1.55 }}>
+              <thead>
+                <tr style={{ backgroundColor: PAPER_DIM }}>
+                  {header.map((cell, cellIndex) => (
+                    <th key={cellIndex} style={{ padding: "12px 14px", borderBottom: `2px solid ${MARKER}`, textAlign: "left", verticalAlign: "top", fontWeight: 800 }}>{renderTableCell(cell)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={rowIndex} style={{ backgroundColor: rowIndex % 2 ? `${PAPER_DIM}66` : "transparent" }}>
+                    {header.map((_, cellIndex) => (
+                      <td key={cellIndex} style={{ padding: "12px 14px", borderTop: `1px solid ${INK}14`, verticalAlign: "top", color: `${INK}d9` }}>{renderTableCell(row[cellIndex] || "")}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        i = end - 1;
+        continue;
+      }
+
+      const line = blocks[i];
       const trimmed = line.trim();
-      if (!trimmed) return <div key={i} className="h-3" />;
-      if (trimmed.startsWith("```")) return null;
+      if (!trimmed) {
+        rendered.push(<div key={i} className="h-3" />);
+        continue;
+      }
+      if (trimmed.startsWith("```")) continue;
 
       if (/^#{1,3}\s/.test(trimmed)) {
-        return (
-          <h3
-            key={i}
-            className="mt-5 mb-2 text-lg font-extrabold"
-            style={{ color: INK }}
-          >
-            {trimmed.replace(/^#{1,3}\s/, "")}
-          </h3>
-        );
+        rendered.push(<h3 key={i} className="mt-5 mb-2 text-lg font-extrabold" style={{ color: INK }}>{trimmed.replace(/^#{1,3}\s/, "")}</h3>);
+        continue;
       }
 
       if (/^[-*]\s/.test(trimmed)) {
-        return (
+        rendered.push(
           <div key={i} className="flex gap-3 my-1.5">
             <span className="mt-2.5 h-1 w-3 shrink-0 rounded-full" style={{ backgroundColor: CORAL }} />
             <span>{formatInline(trimmed.replace(/^[-*]\s/, ""))}</span>
           </div>
         );
+        continue;
       }
 
       if (/^\d+\.\s/.test(trimmed)) {
         const num = trimmed.match(/^\d+\./)?.[0].replace(".", "");
-        return (
+        rendered.push(
           <div key={i} className="flex gap-3 my-2 items-start">
-            <span
-              className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold"
-              style={{ backgroundColor: INK, color: PAPER }}
-            >
-              {num}
-            </span>
+            <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[11px] font-bold" style={{ backgroundColor: INK, color: PAPER }}>{num}</span>
             <span>{formatInline(trimmed.replace(/^\d+\.\s/, ""))}</span>
           </div>
         );
+        continue;
       }
 
-      return (
-        <p key={i} className="my-1.5">
-          {formatInline(line)}
-        </p>
-      );
-    });
+      rendered.push(<p key={i} className="my-1.5">{formatInline(line)}</p>);
+    }
+
+    return rendered;
   };
 
   if (view === "upload") {
@@ -1101,9 +1156,10 @@ export default function App() {
   const lastMessage = messages[messages.length - 1];
   const hasStreamingMessage = messages.some((message) => message.role === "assistant" && message.streaming);
   const showTypingDots = isTyping && !hasStreamingMessage && lastMessage?.role !== "assistant";
+  const activeModel = modelOptions.find((model) => model.value === selectedModel) || modelOptions[0];
 
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden", backgroundColor: PAPER, color: INK }}>
+    <div style={{ display: "flex", width: "100%", maxWidth: "100vw", height: "100vh", overflow: "hidden", backgroundColor: PAPER, color: INK }}>
       <FontLoader />
 
       <ConfirmDeleteModal
@@ -1151,14 +1207,13 @@ export default function App() {
         </div>
       )}
 
-      <main style={{ position: "relative", display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}>
+      <main style={{ position: "relative", display: "flex", minWidth: 0, maxWidth: "100%", flex: 1, flexDirection: "column", overflowX: "hidden" }}>
         <div
-          className="lg:hidden"
           style={{
             display: "flex",
             alignItems: "center",
             gap: "10px",
-            height: "52px",
+            minHeight: "52px",
             flexShrink: 0,
             padding: "0 12px",
             borderBottom: `1px solid ${INK}14`,
@@ -1173,12 +1228,31 @@ export default function App() {
           >
             <Menu className="h-4 w-4" />
           </button>
-          <span style={{ fontSize: "13px", fontWeight: 700, color: `${INK}b0`, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{ fontSize: "13px", fontWeight: 700, color: `${INK}b0`, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
             {attachedFiles.length > 1 ? `${attachedFiles.length} documents` : attachedFiles[0] || "Document"}
           </span>
+          <label
+            title="Choose the model for your next message"
+            style={{ display: "flex", alignItems: "center", gap: "7px", flexShrink: 0, fontSize: "11px", fontWeight: 800, color: `${INK}80` }}
+          >
+            <Sparkles style={{ width: "14px", height: "14px", color: TEAL }} />
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              disabled={isTyping}
+              aria-label="Choose AI model"
+              style={{ maxWidth: "118px", border: `1px solid ${INK}1f`, borderRadius: "9px", backgroundColor: "#ffffff", color: INK, padding: "7px 24px 7px 9px", fontSize: "12px", fontWeight: 800, cursor: isTyping ? "not-allowed" : "pointer", opacity: isTyping ? 0.6 : 1, outlineColor: TEAL }}
+            >
+              {modelOptions.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+            </select>
+          </label>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "7px", width: "100%", maxWidth: "720px", boxSizing: "border-box", margin: "0 auto", padding: "14px 16px 0", fontSize: "11px", color: `${INK}66` }}>
+          <span style={{ width: "6px", height: "6px", borderRadius: "999px", backgroundColor: TEAL, flexShrink: 0 }} />
+          <span>Using <strong style={{ color: INK }}>{activeModel.label}</strong> · {activeModel.detail}</span>
         </div>
         <section style={{ flex: 1, overflowY: "auto" }} className="scrollbar-quiet">
-          <div style={{ margin: "0 auto", width: "100%", maxWidth: "720px", padding: "40px 16px 180px" }}>
+          <div style={{ margin: "0 auto", width: "100%", maxWidth: "720px", boxSizing: "border-box", padding: "40px 16px 180px" }}>
             {messages.length === 1 && messages[0].role === "assistant" && (
               <div style={{ marginBottom: "36px" }}>
                 <div style={{ marginBottom: "24px", fontSize: "26px", fontWeight: 800, letterSpacing: "-0.02em" }}>
