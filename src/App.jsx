@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 const API_URL = "https://learn-with-ai-backend-jx3x.onrender.com";
+//const API_URL = "http://127.0.0.1:8000";
 const PORTFOLIO_URL = "https://dev-mahesh-portfolio.web.app/";
 
 const INK = "#20293A";
