@@ -16,8 +16,8 @@ import {
   X,
 } from "lucide-react";
 
-const API_URL = "https://learn-with-ai-backend-jx3x.onrender.com";
-//const API_URL = "http://127.0.0.1:8000";
+//const API_URL = "https://learn-with-ai-backend-jx3x.onrender.com";
+const API_URL = "http://127.0.0.1:8000";
 const PORTFOLIO_URL = "https://dev-mahesh-portfolio.web.app/";
 
 const INK = "#20293A";
@@ -748,8 +748,15 @@ export default function App() {
       }
       if (trimmed.startsWith("```")) continue;
 
+     if (trimmed === "---") {
+        rendered.push(<hr key={i} style={{ margin: "24px 0", borderTop: `1px solid ${INK}22`, borderBottom: "none" }} />);
+        continue;
+      }
+
       if (/^#{1,3}\s/.test(trimmed)) {
-        rendered.push(<h3 key={i} className="mt-5 mb-2 text-lg font-extrabold" style={{ color: INK }}>{trimmed.replace(/^#{1,3}\s/, "")}</h3>);
+        rendered.push(<h3 key={i} className="mt-5 mb-2 text-lg font-extrabold" style={{ color: INK }}>
+          {formatInline(trimmed.replace(/^#{1,3}\s/, ""))}
+        </h3>);
         continue;
       }
 
